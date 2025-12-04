@@ -1,0 +1,52 @@
+# Environment variables and secrets
+.env
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Logs
+*.log
+logs/
+bridge.stdout.log
+bridge.stderr.log
+*.stdout.log
+*.stderr.log
+
+# State files
+*.state
+bridge.lock
+bridge_processed_messages.txt
+last_rowid.state*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+
+# Test outputs
+test_output/
+*.test.log
+

@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Synthetic Friends Bridge - System Monitor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .last-update {
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .status-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .status-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.3);
+        }
+
+        .status-card.error {
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%);
+            color: white;
+            animation: pulse 2s infinite;
+        }
+
+        .status-card.warning {
+            background: linear-gradient(135deg, #ffa726 0%, #fb8c00 100%);
+            color: white;
+        }
+
+        .status-card.success {
+            background: linear-gradient(135deg, #66bb6a 0%, #43a047 100%);
+            color: white;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.8; }
+        }
+
+        .status-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 15px;
+        }
+
+        .status-title {
+            font-size: 1.3em;
+            font-weight: bold;
+        }
+
+        .status-indicator {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #ccc;
+            box-shadow: 0 0 10px rgba(0,0,0,0.3);
+        }
+
+        .status-indicator.online {
+            background: #4caf50;
+            animation: blink 2s infinite;
+        }
+
+        .status-indicator.offline {
+            background: #f44336;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .status-details {
+            font-size: 0.9em;
+            line-height: 1.6;
+        }
+
+        .status-details strong {
+            display: block;
+            margin-top: 10px;
+            margin-bottom: 5px;
+        }
+
+        .status-value {
+            font-family: 'Courier New', monospace;
+            background: rgba(0,0,0,0.1);
+            padding: 5px 10px;
+            border-radius: 5px;
+            display: inline-block;
+            word-break: break-all;
+        }
+
+        .overall-status {
+            text-align: center;
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 20px;
+        }
+
+        .overall-status.all-operational {
+            background: linear-gradient(135deg, #66bb6a 0%, #43a047 100%);
+            color: white;
+        }
+
+        .overall-status.has-issues {
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%);
+            color: white;
+            animation: pulse 2s infinite;
+        }
+
+        .overall-status h2 {
+            font-size: 2em;
+            margin-bottom: 10px;
+        }
+
+        .refresh-info {
+            text-align: center;
+            color: white;
+            opacity: 0.8;
+            font-size: 0.9em;
+        }
+
+        .logs-section {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-top: 30px;
+        }
+
+        .logs-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #f0f0f0;
+            padding-bottom: 10px;
+        }
+
+        .logs-header h2 {
+            font-size: 1.5em;
+            color: #333;
+            margin: 0;
+        }
+
+        .log-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .log-controls select {
+            padding: 5px 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 0.9em;
+        }
+
+        .log-controls button {
+            padding: 5px 15px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.9em;
+        }
+
+        .log-controls button:hover {
+            background: #5568d3;
+        }
+
+        .logs-container {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            font-family: 'Courier New', 'Monaco', monospace;
+            font-size: 0.85em;
+            padding: 15px;
+            border-radius: 8px;
+            max-height: 400px;
+            overflow-y: auto;
+            line-height: 1.6;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 3px 0;
+            border-left: 3px solid transparent;
+            padding-left: 10px;
+        }
+
+        .log-entry.error {
+            border-left-color: #f44336;
+            background: rgba(244, 67, 54, 0.1);
+        }
+
+        .log-entry.warning {
+            border-left-color: #ff9800;
+            background: rgba(255, 152, 0, 0.1);
+        }
+
+        .log-entry.info {
+            border-left-color: #2196f3;
+            background: rgba(33, 150, 243, 0.1);
+        }
+
+        .log-entry.success {
+            border-left-color: #4caf50;
+            background: rgba(76, 175, 80, 0.1);
+        }
+
+        .log-timestamp {
+            color: #888;
+            margin-right: 10px;
+        }
+
+        .log-source {
+            color: #9cdcfe;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+
+        .error-message {
+            color: #ffebee;
+            background: rgba(255,255,255,0.2);
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            font-size: 0.85em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔌 Synthetic Friends Bridge Monitor</h1>
+            <div class="last-update" id="lastUpdate">Initializing...</div>
+        </div>
+
+        <div class="overall-status" id="overallStatus">
+            <h2>Checking System Status...</h2>
+        </div>
+
+        <div class="status-grid">
+            <div class="status-card" id="bridgeCard">
+                <div class="status-header">
+                    <div class="status-title">Bridge Service</div>
+                    <div class="status-indicator" id="bridgeIndicator"></div>
+                </div>
+                <div class="status-details" id="bridgeDetails">
+                    Checking...
+                </div>
+            </div>
+
+            <div class="status-card" id="ngrokCard">
+                <div class="status-header">
+                    <div class="status-title">ngrok Tunnel</div>
+                    <div class="status-indicator" id="ngrokIndicator"></div>
+                </div>
+                <div class="status-details" id="ngrokDetails">
+                    Checking...
+                </div>
+            </div>
+
+            <div class="status-card" id="httpCard">
+                <div class="status-header">
+                    <div class="status-title">HTTP Server (Port 3001)</div>
+                    <div class="status-indicator" id="httpIndicator"></div>
+                </div>
+                <div class="status-details" id="httpDetails">
+                    Checking...
+                </div>
+            </div>
+        </div>
+
+        <div class="refresh-info">
+            Auto-refreshing every 5 seconds
+        </div>
+
+        <div class="logs-section">
+            <div class="logs-header">
+                <h2>📋 Recent Logs</h2>
+                <div class="log-controls">
+                    <select id="logSource">
+                        <option value="all">All Logs</option>
+                        <option value="bridge">Bridge Service</option>
+                        <option value="ngrok">ngrok</option>
+                        <option value="monitor">Monitor Server</option>
+                    </select>
+                    <button onclick="clearLogs()">Clear</button>
+                </div>
+            </div>
+            <div class="logs-container" id="logsContainer">
+                <div class="log-entry">Loading logs...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let checkInterval;
+
+        function updateLastUpdate() {
+            const now = new Date();
+            document.getElementById('lastUpdate').textContent = 
+                `Last updated: ${now.toLocaleTimeString()}`;
+        }
+
+        async function checkBridgeService() {
+            try {
+                // Try API server first (port 8766)
+                const response = await fetch('http://localhost:8766/api/check-bridge');
+                if (!response.ok) throw new Error('Service check failed');
+                const data = await response.json();
+                return data;
+            } catch (error) {
+                // Fallback: if HTTP server is running, bridge is likely running
+                try {
+                    const httpCheck = await fetch('http://localhost:3001/health');
+                    if (httpCheck.ok) {
+                        return { running: true, pid: 'N/A', note: 'Inferred from HTTP server' };
+                    }
+                } catch (e) {
+                    // Ignore
+                }
+                return { running: false, error: 'Unable to check service: ' + error.message };
+            }
+        }
+
+        async function checkNgrok() {
+            try {
+                // Use API server endpoint
+                const response = await fetch('http://localhost:8766/api/check-ngrok');
+                if (!response.ok) throw new Error('ngrok check failed');
+                const data = await response.json();
+                return data;
+            } catch (error) {
+                return { running: false, error: error.message };
+            }
+        }
+
+        async function checkHttpServer() {
+            try {
+                // Use API server endpoint
+                const response = await fetch('http://localhost:8766/api/check-http');
+                if (!response.ok) throw new Error('HTTP check failed');
+                const data = await response.json();
+                return data;
+            } catch (error) {
+                return { running: false, error: error.message };
+            }
+        }
+
+        function updateCard(cardId, indicatorId, detailsId, status) {
+            const card = document.getElementById(cardId);
+            const indicator = document.getElementById(indicatorId);
+            const details = document.getElementById(detailsId);
+
+            // Remove all status classes
+            card.classList.remove('success', 'error', 'warning');
+            indicator.classList.remove('online', 'offline');
+
+            if (status.running) {
+                card.classList.add('success');
+                indicator.classList.add('online');
+            } else {
+                card.classList.add('error');
+                indicator.classList.add('offline');
+            }
+
+            // Update details based on service type
+            if (cardId === 'bridgeCard') {
+                if (status.running) {
+                    details.innerHTML = `<strong>Status:</strong> <span class="status-value">Running</span><br>
+                       <strong>PID:</strong> <span class="status-value">${status.pid || 'N/A'}</span>`;
+                    if (status.uptime) {
+                        details.innerHTML += `<br><strong>Uptime:</strong> <span class="status-value">${status.uptime}</span>`;
+                    }
+                } else {
+                    details.innerHTML = `<strong>Status:</strong> <span class="status-value">STOPPED</span><br>
+                       <div class="error-message">${status.error || 'Service is not running'}</div>`;
+                }
+            } else if (cardId === 'ngrokCard') {
+                if (status.running && status.tunnel) {
+                    const addr = status.tunnel.addr || status.tunnel.config?.addr || 'N/A';
+                    details.innerHTML = `<strong>Status:</strong> <span class="status-value">Active</span><br>
+                                        <strong>Public URL:</strong> <span class="status-value">${status.tunnel.public_url}</span><br>
+                                        <strong>Forwarding:</strong> <span class="status-value">${addr}</span>`;
+                } else {
+                    details.innerHTML = `<strong>Status:</strong> <span class="status-value">STOPPED</span><br>
+                                        <div class="error-message">${status.error || 'ngrok tunnel is not active'}</div>`;
+                }
+            } else if (cardId === 'httpCard') {
+                if (status.running) {
+                    details.innerHTML = `<strong>Status:</strong> <span class="status-value">${status.status || 'OK'}</span><br>
+                                        <strong>Service:</strong> <span class="status-value">${status.service || 'bridge_send_server'}</span><br>
+                                        <strong>Port:</strong> <span class="status-value">3001</span>`;
+                } else {
+                    details.innerHTML = `<strong>Status:</strong> <span class="status-value">STOPPED</span><br>
+                                        <div class="error-message">${status.error || 'HTTP server is not responding'}</div>`;
+                }
+            }
+        }
+
+        function updateOverallStatus(bridgeStatus, ngrokStatus, httpStatus) {
+            const overallCard = document.getElementById('overallStatus');
+            const allRunning = bridgeStatus.running && ngrokStatus.running && httpStatus.running;
+
+            overallCard.classList.remove('all-operational', 'has-issues');
+            
+            if (allRunning) {
+                overallCard.classList.add('all-operational');
+                overallCard.innerHTML = '<h2>✅ ALL SYSTEMS OPERATIONAL</h2><p>All services are running normally</p>';
+            } else {
+                overallCard.classList.add('has-issues');
+                const issues = [];
+                if (!bridgeStatus.running) issues.push('Bridge Service');
+                if (!ngrokStatus.running) issues.push('ngrok Tunnel');
+                if (!httpStatus.running) issues.push('HTTP Server');
+                overallCard.innerHTML = `<h2>⚠️ SYSTEM ISSUES DETECTED</h2><p>Problems with: ${issues.join(', ')}</p>`;
+            }
+        }
+
+        async function checkAllServices() {
+            updateLastUpdate();
+
+            try {
+                // Check services in parallel
+                const [bridgeStatus, ngrokStatus, httpStatus] = await Promise.all([
+                    checkBridgeService().catch(e => ({ running: false, error: e.message })),
+                    checkNgrok().catch(e => ({ running: false, error: e.message })),
+                    checkHttpServer().catch(e => ({ running: false, error: e.message }))
+                ]);
+
+                updateCard('bridgeCard', 'bridgeIndicator', 'bridgeDetails', bridgeStatus);
+                updateCard('ngrokCard', 'ngrokIndicator', 'ngrokDetails', ngrokStatus);
+                updateCard('httpCard', 'httpIndicator', 'httpDetails', httpStatus);
+                updateOverallStatus(bridgeStatus, ngrokStatus, httpStatus);
+            } catch (error) {
+                console.error('Error checking services:', error);
+                // Update cards with error status
+                updateCard('bridgeCard', 'bridgeIndicator', 'bridgeDetails', { running: false, error: 'Check failed' });
+                updateCard('ngrokCard', 'ngrokIndicator', 'ngrokDetails', { running: false, error: 'Check failed' });
+                updateCard('httpCard', 'httpIndicator', 'httpDetails', { running: false, error: 'Check failed' });
+            }
+        }
+
+        // Initial check
+        checkAllServices();
+
+        // Set up auto-refresh every 5 seconds
+        checkInterval = setInterval(checkAllServices, 5000);
+
+        // Also check when page becomes visible again
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                checkAllServices();
+                loadLogs();
+            }
+        });
+
+        // Log loading functions
+        async function loadLogs() {
+            try {
+                const logSource = document.getElementById('logSource').value;
+                const response = await fetch(`http://localhost:8766/api/logs?source=${logSource}&lines=50`);
+                if (!response.ok) throw new Error('Failed to load logs');
+                const data = await response.json();
+                displayLogs(data.logs || []);
+            } catch (error) {
+                document.getElementById('logsContainer').innerHTML = 
+                    `<div class="log-entry error">Error loading logs: ${error.message}</div>`;
+            }
+        }
+
+        function displayLogs(logs) {
+            const container = document.getElementById('logsContainer');
+            if (logs.length === 0) {
+                container.innerHTML = '<div class="log-entry">No logs available</div>';
+                return;
+            }
+
+            container.innerHTML = logs.map(log => {
+                const timestamp = log.timestamp ? `<span class="log-timestamp">${log.timestamp}</span>` : '';
+                const source = log.source ? `<span class="log-source">[${log.source}]</span>` : '';
+                const level = log.level || 'info';
+                return `<div class="log-entry ${level}">${timestamp}${source}${escapeHtml(log.message)}</div>`;
+            }).join('');
+            
+            // Auto-scroll to bottom
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function clearLogs() {
+            document.getElementById('logsContainer').innerHTML = '<div class="log-entry">Logs cleared</div>';
+        }
+
+        // Update log source selector
+        document.getElementById('logSource').addEventListener('change', loadLogs);
+
+        // Load logs initially and on interval
+        loadLogs();
+        setInterval(loadLogs, 5000);
+    </script>
+</body>
+</html>
+

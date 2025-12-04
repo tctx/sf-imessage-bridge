@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Unique identifier for this launch agent -->
+    <key>Label</key>
+    <string>com.sf.imessage-bridge</string>
+    
+    <!-- Path to Python and the bridge script -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/syntheticfriends/Documents/projects/sf-imessage-bridge/bridge.py</string>
+    </array>
+    
+    <!-- Working directory -->
+    <key>WorkingDirectory</key>
+    <string>/Users/syntheticfriends/Documents/projects/sf-imessage-bridge</string>
+    
+    <!-- Run on load (at login/boot) -->
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <!-- Keep it alive - restart if it crashes -->
+    <key>KeepAlive</key>
+    <true/>
+    
+    <!-- Standard output log -->
+    <key>StandardOutPath</key>
+    <string>/Users/syntheticfriends/Documents/projects/sf-imessage-bridge/logs/bridge.stdout.log</string>
+    
+    <!-- Standard error log -->
+    <key>StandardErrorPath</key>
+    <string>/Users/syntheticfriends/Documents/projects/sf-imessage-bridge/logs/bridge.stderr.log</string>
+    
+    <!-- Environment variables (load from .env file path) -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/syntheticfriends/Library/Python/3.9/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    
+    <!-- Throttle restarts to prevent rapid crash loops -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    
+    <!-- Nice level (process priority, 0 is default) -->
+    <key>Nice</key>
+    <integer>0</integer>
+</dict>
+</plist>
+

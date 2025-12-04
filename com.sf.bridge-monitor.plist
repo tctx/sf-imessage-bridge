@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Unique identifier for this launch agent -->
+    <key>Label</key>
+    <string>com.sf.bridge-monitor</string>
+    
+    <!-- Path to Python and the monitor server script -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/syntheticfriends/Documents/projects/sf-imessage-bridge/monitor_api_server.py</string>
+    </array>
+    
+    <!-- Working directory -->
+    <key>WorkingDirectory</key>
+    <string>/Users/syntheticfriends/Documents/projects/sf-imessage-bridge</string>
+    
+    <!-- Run on load (at login/boot) -->
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <!-- Keep it alive - restart if it crashes -->
+    <key>KeepAlive</key>
+    <true/>
+    
+    <!-- Standard output log -->
+    <key>StandardOutPath</key>
+    <string>/Users/syntheticfriends/Documents/projects/sf-imessage-bridge/logs/monitor.stdout.log</string>
+    
+    <!-- Standard error log -->
+    <key>StandardErrorPath</key>
+    <string>/Users/syntheticfriends/Documents/projects/sf-imessage-bridge/logs/monitor.stderr.log</string>
+    
+    <!-- Throttle restarts to prevent rapid crash loops -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
+

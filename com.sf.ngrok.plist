@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Unique identifier for this launch agent -->
+    <key>Label</key>
+    <string>com.sf.ngrok</string>
+    
+    <!-- Path to ngrok -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/ngrok</string>
+        <string>http</string>
+        <string>3001</string>
+    </array>
+    
+    <!-- Working directory -->
+    <key>WorkingDirectory</key>
+    <string>/Users/syntheticfriends/Documents/projects/sf-imessage-bridge</string>
+    
+    <!-- Run on load (at login/boot) -->
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <!-- Keep it alive - restart if it crashes -->
+    <key>KeepAlive</key>
+    <true/>
+    
+    <!-- Standard output log -->
+    <key>StandardOutPath</key>
+    <string>/Users/syntheticfriends/Documents/projects/sf-imessage-bridge/logs/ngrok.stdout.log</string>
+    
+    <!-- Standard error log -->
+    <key>StandardErrorPath</key>
+    <string>/Users/syntheticfriends/Documents/projects/sf-imessage-bridge/logs/ngrok.stderr.log</string>
+    
+    <!-- Throttle restarts to prevent rapid crash loops -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
+

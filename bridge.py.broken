@@ -1,0 +1,880 @@
+#!/usr/bin/env python3
+import os, time, json, sqlite3, subprocess, fcntl, random, sys
+from pathlib import Path
+from datetime import datetime
+from typing import Set, Dict, List
+import requests
+
+# -----------------------------
+# Safe Print Function
+# -----------------------------
+def safe_safe_print(*args, **kwargs):
+    """Print that won't crash on BrokenPipeError."""
+    try:
+        safe_print(*args, **kwargs)
+        if kwargs.get('flush', False) or len(kwargs) == 0:
+            sys.stdout.flush()
+    except (BrokenPipeError, IOError):
+        # stdout is closed - that's okay, we log to files
+        pass
+
+# -----------------------------
+# Logging Setup
+# -----------------------------
+BACKEND_LOG_FILE = Path(__file__).parent / "backend_communication.log"
+
+def log_backend(message: str, data: dict = None):
+    """Log backend communication to dedicated log file."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    log_entry = f"[{timestamp}] {message}"
+    
+    if data:
+        # Redact API key for security
+        safe_data = data.copy()
+        if 'headers' in safe_data and 'X-API-Key' in safe_data['headers']:
+            key = safe_data['headers']['X-API-Key']
+            safe_data['headers']['X-API-Key'] = f"{key[:10]}...{key[-10:]}" if len(key) > 20 else "***REDACTED***"
+        
+        log_entry += f"\n{json.dumps(safe_data, indent=2, default=str)}"
+    
+    log_entry += "\n" + ("-" * 80) + "\n"
+    
+    # Always write to file first (most important)
+    try:
+        with open(BACKEND_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(log_entry)
+            f.flush()  # Ensure it's written immediately
+    except Exception:
+        pass  # Silently fail - don't crash on logging errors
+    
+    # Try to print to stdout, but don't crash if pipe is broken
+    try:
+        print(log_entry.strip(), flush=True)
+    except (BrokenPipeError, IOError):
+        # stdout is closed or broken - that's okay, we logged to file
+        pass
+
+# -----------------------------
+# Load .env file
+# -----------------------------
+def load_env(path=".env"):
+    if os.path.exists(path):
+        for line in open(path):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            k, _, v = line.partition("=")
+            os.environ[k.strip()] = v.strip()
+
+load_env()
+
+SF_API_URL  = os.getenv("SF_API_URL", "").strip()
+SF_API_KEY  = os.getenv("SF_API_KEY", "").strip()
+POLL        = float(os.getenv("POLL_INTERVAL", "2"))
+STATE       = os.getenv("STATE_FILE", "./last_rowid.state")
+ENABLE_TYPING = os.getenv("ENABLE_TYPING_INDICATOR", "true").lower() == "true"
+ENABLE_REACTIONS = os.getenv("ENABLE_REACTIONS", "true").lower() == "true"
+
+if not SF_API_URL or not SF_API_KEY:
+    raise SystemExit("Set SF_API_URL and SF_API_KEY in your .env file.")
+
+# Log startup configuration (with redacted API key)
+def get_redacted_key(key: str) -> str:
+    """Return redacted version of API key for logging."""
+    if len(key) > 20:
+        return f"{key[:10]}...{key[-10:]}"
+    return "***REDACTED***"
+
+log_backend(
+    "🚀 BRIDGE STARTUP - Configuration loaded",
+    {
+        "api_url": SF_API_URL,
+        "api_key": get_redacted_key(SF_API_KEY),
+        "api_key_length": len(SF_API_KEY),
+        "poll_interval": POLL,
+        "typing_enabled": ENABLE_TYPING,
+        "reactions_enabled": ENABLE_REACTIONS,
+        "startup_time": datetime.now().isoformat()
+    }
+)
+
+HOME     = str(Path.home())
+CHAT_DB  = f"{HOME}/Library/Messages/chat.db"
+BRIDGE_DIR = Path(__file__).parent
+ASCRIPT  = str(BRIDGE_DIR / "imessage_send.applescript")
+ASCRIPT_TYPING = str(BRIDGE_DIR / "show_typing_indicator.applescript")
+ASCRIPT_REACTION = str(BRIDGE_DIR / "send_tapback.applescript")
+LOCK_FILE = str(BRIDGE_DIR / "bridge.lock")
+_lock_handle = None
+
+def acquire_lock():
+    """Ensure only one bridge instance is running."""
+    global _lock_handle
+    try:
+        _lock_handle = open(LOCK_FILE, "w")
+        fcntl.flock(_lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Write PID to lock file for debugging
+        _lock_handle.write(str(os.getpid()))
+        _lock_handle.flush()
+    except BlockingIOError:
+        log_backend("⚠️ Lock file exists - another instance running or stale lock", {})
+        raise SystemExit("Another bridge.py instance is already running. If not, remove bridge.lock.")
+    except Exception as e:
+        log_backend(f"❌ Failed to acquire lock: {e}", {})
+        raise
+
+acquire_lock()
+log_backend("🔒 Lock acquired successfully", {"pid": os.getpid()})
+
+# Processed message tracking (CRITICAL for preventing duplicates)
+PROCESSED_IDS_FILE = "bridge_processed_messages.txt"
+processed_message_ids: Set[int] = set()
+
+SQL = (
+    "SELECT message.ROWID, message.text, "
+    "coalesce(handle.uncanonicalized_id, handle.id) AS sender "
+    "FROM message "
+    "LEFT JOIN handle ON handle.ROWID = message.handle_id "
+    "WHERE message.is_from_me = 0 "
+    "AND message.text IS NOT NULL "
+    "AND message.service = 'iMessage' "
+    "AND message.ROWID > ? "
+    "ORDER BY message.ROWID ASC LIMIT 100;"
+)
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def read_last():
+    try:
+        return int(open(STATE).read().strip())
+    except Exception:
+        return 0
+
+def write_last(v):
+    with open(STATE, "w") as f:
+        f.write(str(v))
+
+def open_ro(path):
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+def load_processed_ids() -> Set[int]:
+    """Load previously processed message IDs from disk to prevent duplicates."""
+    if not os.path.exists(PROCESSED_IDS_FILE):
+        return set()
+    
+    with open(PROCESSED_IDS_FILE, 'r') as f:
+        return {int(line.strip()) for line in f if line.strip().isdigit()}
+
+def save_processed_id(message_id: int):
+    """Save a processed message ID to disk."""
+    with open(PROCESSED_IDS_FILE, 'a') as f:
+        f.write(f"{message_id}\n")
+
+def calculate_human_typing_delay(text: str) -> float:
+    """
+    Calculate realistic typing delay based on message length.
+    
+    Human typing speeds (mobile):
+    - Fast typer: 50-60 characters per second
+    - With thinking pauses: slight pauses for longer messages
+    - Natural variation: ±20%
+    
+    Returns typing duration in seconds.
+    """
+    if not text:
+        return 1.0
+    
+    # Character count
+    char_count = len(text)
+    
+    # Base typing speed: 55 chars/second (fast but believable)
+    base_chars_per_second = 55.0
+    
+    # Add small thinking pauses for longer messages
+    # Every 80 characters, add a small pause (0.3-0.6 second)
+    thinking_pauses = (char_count // 80) * random.uniform(0.3, 0.6)
+    
+    # Calculate base typing time
+    base_time = char_count / base_chars_per_second
+    
+    # Add natural variation (±15%)
+    variation = random.uniform(0.88, 1.12)
+    
+    # Total time with thinking pauses
+    total_time = (base_time * variation) + thinking_pauses
+    
+    # Minimum 1.2 seconds (slightly faster minimum)
+    # Maximum 5 seconds (cap at 5s - messages should be shorter if more)
+    return max(1.2, min(5.0, total_time))
+
+def calculate_delay_before(is_first_message: bool) -> float:
+    """
+    Calculate realistic delay before starting to type.
+    
+    First message: INSTANT response (0.1-0.3s) - show bubbles immediately!
+    Follow-up messages: Quick pause (0.3-0.6s) - brief thinking between messages
+    """
+    if is_first_message:
+        return random.uniform(0.1, 0.3)  # Show bubbles almost instantly!
+    else:
+        return random.uniform(0.3, 0.6)  # Quick pause between messages
+
+# -----------------------------
+# Messaging / API calls
+# -----------------------------
+def send_imessage(target: str, text: str, effect: str = "none"):
+    """
+    Send message using AppleScript.
+    
+    Args:
+        target: Phone number to send to
+        text: Message text
+        effect: Message effect (slam, loud, gentle, etc.)
+                Note: Effects are not currently supported by macOS Messages AppleScript,
+                but the parameter is here for future compatibility.
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        if effect and effect != "none":
+            result = subprocess.run(
+                ["osascript", ASCRIPT, target, text, effect],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10
+            )
+        else:
+            result = subprocess.run(
+                ["osascript", ASCRIPT, target, text],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10
+            )
+        
+        # Log success
+        stdout = result.stdout.strip() if result.stdout else ""
+        if stdout:
+            safe_print(f"[SEND] ✅ AppleScript returned: '{stdout}'")
+        else:
+            safe_print(f"[SEND] ✅ Message sent successfully")
+        return True
+        
+    except subprocess.TimeoutExpired:
+        safe_print(f"[SEND] ❌ Message send TIMED OUT to {target} after 10 seconds")
+        safe_print(f"[SEND] 💡 Tip: Check if Messages.app is responding")
+        return False
+        
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr.strip() if e.stderr else str(e)
+        safe_print(f"[SEND] ❌ Message send FAILED to {target}")
+        safe_print(f"[SEND]    Exit code: {e.returncode}")
+        if error_msg:
+            safe_print(f"[SEND]    Error: {error_msg}")
+        safe_print(f"[SEND] 💡 Tip: Check that Messages.app is running and logged into iCloud")
+        return False
+        
+    except FileNotFoundError:
+        safe_print(f"[SEND] ❌ CRITICAL: AppleScript file not found: {ASCRIPT}")
+        return False
+        
+    except Exception as e:
+        safe_print(f"[SEND] ❌ Unexpected error sending message: {type(e).__name__}: {e}")
+        return False
+
+def show_typing_indicator(target: str, retry: int = 3):
+    """
+    Show typing indicator bubble in iMessage.
+    
+    Args:
+        target: Phone number to show typing indicator for
+        retry: Number of retry attempts if it fails
+    """
+    if not ENABLE_TYPING:
+        safe_print(f"[TYPE] ⚠️ Typing indicators DISABLED (ENABLE_TYPING_INDICATOR={ENABLE_TYPING})")
+        return False
+    
+    safe_print(f"[TYPE] 🔄 Starting typing indicator for {target}...")
+    
+    for attempt in range(retry):
+        try:
+            safe_print(f"[TYPE] 📞 Calling AppleScript (attempt {attempt + 1}/{retry})...")
+            result = subprocess.run(
+                ["osascript", ASCRIPT_TYPING, target],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True
+            )
+            
+            # Log the result
+            stdout = result.stdout.strip() if result.stdout else ""
+            stderr = result.stderr.strip() if result.stderr else ""
+            
+            safe_print(f"[TYPE] ✓ Typing indicator AppleScript returned: '{stdout}'")
+            if stderr:
+                safe_print(f"[TYPE] ⚠️ AppleScript stderr: {stderr}")
+            
+            # Success!
+            if attempt > 0:
+                safe_print(f"[TYPE] ✓ Typing indicator succeeded on attempt {attempt + 1}")
+            else:
+                safe_print(f"[TYPE] ✅ Typing indicator shown successfully!")
+            return True
+            
+        except subprocess.TimeoutExpired:
+            error_msg = "AppleScript timed out after 10 seconds"
+            if attempt < retry - 1:
+                safe_print(f"[TYPE] ⏱️ {error_msg}, retrying in 1s...")
+                time.sleep(1.0)
+            else:
+                safe_print(f"[TYPE] ✗ Failed after {retry} attempts: {error_msg}")
+                
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr.strip() if e.stderr else str(e)
+            stdout_msg = e.stdout.strip() if e.stdout else ""
+            
+            safe_print(f"[TYPE] ❌ AppleScript error (exit code {e.returncode})")
+            if stdout_msg:
+                safe_print(f"[TYPE]    stdout: {stdout_msg}")
+            if error_msg:
+                safe_print(f"[TYPE]    stderr: {error_msg}")
+            
+            if attempt < retry - 1:
+                safe_print(f"[TYPE] 🔄 Retrying in 1s...")
+                time.sleep(1.0)
+            else:
+                safe_print(f"[TYPE] ✗ Failed after {retry} attempts")
+                safe_print(f"[TYPE] 💡 Tip: Check accessibility permissions for osascript")
+                
+        except FileNotFoundError:
+            safe_print(f"[TYPE] ✗ CRITICAL: AppleScript file not found: {ASCRIPT_TYPING}")
+            return False
+            
+        except Exception as e:
+            safe_print(f"[TYPE] ⚠️ Unexpected error: {type(e).__name__}: {e}")
+            if attempt < retry - 1:
+                safe_print(f"[TYPE] 🔄 Retrying in 1s...")
+                time.sleep(1.0)
+            else:
+                safe_print(f"[TYPE] ✗ Failed after {retry} attempts")
+    
+    return False
+
+def send_tapback(target: str, reaction_type: str, retry: int = 3):
+    """
+    Send a tapback reaction to the last message using GUI automation.
+    
+    Args:
+        target: Phone number to send reaction to
+        reaction_type: Type of reaction (love, like, dislike, haha, emphasize, question)
+        retry: Number of retry attempts if it fails
+    
+    Returns:
+        bool: True if successful, False otherwise
+    
+    Note: Requires Accessibility permissions for GUI automation.
+    Reaction types: "love", "like", "dislike", "haha", "emphasize", "question"
+    """
+    if not ENABLE_REACTIONS:
+        safe_print(f"[REACT] ⚠️ Reactions DISABLED (ENABLE_REACTIONS={ENABLE_REACTIONS})")
+        return False
+    
+    safe_print(f"[REACT] 🔄 Starting {reaction_type} reaction for {target}...")
+    
+    for attempt in range(retry):
+        try:
+            safe_print(f"[REACT] 📞 Calling AppleScript (attempt {attempt + 1}/{retry})...")
+            result = subprocess.run(
+                ["osascript", ASCRIPT_REACTION, target, reaction_type],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True
+            )
+            
+            # Log the result
+            stdout = result.stdout.strip() if result.stdout else ""
+            stderr = result.stderr.strip() if result.stderr else ""
+            
+            safe_print(f"[REACT] ✓ AppleScript returned: '{stdout}'")
+            if stderr:
+                safe_print(f"[REACT] ⚠️ AppleScript stderr: {stderr}")
+            
+            # Success!
+            if attempt > 0:
+                safe_print(f"[REACT] ✓ {reaction_type} reaction succeeded on attempt {attempt + 1}")
+            else:
+                safe_print(f"[REACT] ✅ {reaction_type} reaction sent successfully!")
+            return True
+            
+        except subprocess.TimeoutExpired:
+            error_msg = "AppleScript timed out after 10 seconds"
+            if attempt < retry - 1:
+                safe_print(f"[REACT] ⏱️ {error_msg}, retrying in 1s...")
+                time.sleep(1.0)
+            else:
+                safe_print(f"[REACT] ✗ {reaction_type} reaction timed out after {retry} attempts")
+                safe_print(f"[REACT] 💡 Tip: Messages app might be unresponsive")
+                
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr.strip() if e.stderr else str(e)
+            stdout_msg = e.stdout.strip() if e.stdout else ""
+            
+            safe_print(f"[REACT] ❌ AppleScript error (exit code {e.returncode})")
+            if stdout_msg:
+                safe_print(f"[REACT]    stdout: {stdout_msg}")
+            if error_msg:
+                safe_print(f"[REACT]    stderr: {error_msg}")
+            
+            if attempt < retry - 1:
+                safe_print(f"[REACT] 🔄 Retrying in 1s...")
+                time.sleep(1.0)
+            else:
+                safe_print(f"[REACT] ✗ Failed after {retry} attempts")
+                safe_print(f"[REACT] 💡 Tip: Check accessibility permissions in System Preferences")
+                
+        except FileNotFoundError:
+            safe_print(f"[REACT] ✗ CRITICAL: AppleScript file not found: {ASCRIPT_REACTION}")
+            return False
+            
+        except Exception as e:
+            safe_print(f"[REACT] ⚠️ Unexpected error: {type(e).__name__}: {e}")
+            if attempt < retry - 1:
+                safe_print(f"[REACT] 🔄 Retrying in 1s...")
+                time.sleep(1.0)
+            else:
+                safe_print(f"[REACT] ✗ Failed after {retry} attempts")
+    
+    return False
+
+def call_sf(sender: str, text: str, message_id: int) -> Dict:
+    """Call Synthetic Friends backend and return structured response."""
+    # Reload .env on each request to ensure we always have the latest API key
+    load_env()
+    current_api_key = os.getenv("SF_API_KEY", "").strip()
+    current_api_url = os.getenv("SF_API_URL", "").strip()
+    
+    # Use the freshly loaded values
+    if not current_api_key or not current_api_url:
+        raise ValueError("SF_API_KEY or SF_API_URL not found in .env file")
+    
+    payload = {
+        "from": sender,
+        "text": text,
+        "channel": "imessage",
+        "metadata": {
+            "source": "mac_bridge",
+            "message_id": message_id,
+            "received_at": datetime.utcnow().isoformat() + "Z",
+        },
+    }
+
+    headers = {
+        "X-API-Key": current_api_key,
+        "Content-Type": "application/json",
+    }
+    
+    # Log which API key we're using (redacted) for debugging
+    if current_api_key != SF_API_KEY:
+        log_backend(
+            "⚠️ API KEY CHANGED - Using newly loaded key from .env",
+            {
+                "old_key_preview": get_redacted_key(SF_API_KEY),
+                "new_key_preview": get_redacted_key(current_api_key),
+                "message_id": message_id
+            }
+        )
+
+    # Log outgoing request
+    log_backend(
+        f"📤 OUTGOING REQUEST to backend",
+        {
+            "url": current_api_url,
+            "method": "POST",
+            "headers": {k: (get_redacted_key(v) if k == "X-API-Key" else v) for k, v in headers.items()},
+            "api_key_length": len(current_api_key),
+            "payload": payload,
+            "message_id": message_id,
+            "sender": sender,
+            "text_preview": text[:100] + "..." if len(text) > 100 else text
+        }
+    )
+
+    try:
+        start_time = time.time()
+        r = requests.post(current_api_url, headers=headers, json=payload, timeout=30)
+        elapsed_time = time.time() - start_time
+        
+        # Log response details
+        try:
+            response_json = r.json()
+            response_preview = json.dumps(response_json, indent=2)
+            if len(response_preview) > 1000:
+                response_preview = response_preview[:1000] + "\n... (truncated)"
+        except:
+            response_preview = r.text[:500] if r.text else "(no response body)"
+        
+        log_backend(
+            f"📥 INCOMING RESPONSE from backend",
+            {
+                "status_code": r.status_code,
+                "elapsed_time_seconds": f"{elapsed_time:.3f}",
+                "headers": dict(r.headers),
+                "response_body": response_json if r.status_code == 200 else response_preview,
+                "message_id": message_id
+            }
+        )
+        
+        r.raise_for_status()
+        return r.json()
+        
+    except requests.exceptions.HTTPError as e:
+        # Log the actual error response from backend
+        try:
+            error_body = e.response.text[:1000] if e.response.text else "(no error body)"
+            error_headers = dict(e.response.headers) if e.response.headers else {}
+            
+            log_backend(
+                f"❌ BACKEND HTTP ERROR",
+                {
+                    "status_code": e.response.status_code,
+                    "url": str(e.response.url),
+                    "headers": error_headers,
+                    "error_body": error_body,
+                    "message_id": message_id
+                }
+            )
+            
+            safe_print(f"[!!BACKEND ERROR!!] {e.response.status_code}: {error_body[:500]}")
+            
+            # For 401 errors, return empty response with special marker instead of crashing
+            # This allows the bridge to continue processing other messages
+            if e.response.status_code == 401:
+                log_backend(
+                    f"⚠️ 401 UNAUTHORIZED - Returning empty response to continue bridge operation",
+                    {
+                        "message_id": message_id,
+                        "sender": sender,
+                        "note": "Bridge will continue running but message will not be processed"
+                    }
+                )
+                # Return empty response structure with marker so bridge knows it's a 401
+                return {
+                    "target": sender,
+                    "messages": [],
+                    "reaction": None,
+                    "_401_error": True  # Marker to identify 401 errors
+                }
+        except Exception as log_err:
+            log_backend(
+                f"❌ BACKEND HTTP ERROR (failed to parse)",
+                {
+                    "error": str(e),
+                    "message_id": message_id,
+                    "log_error": str(log_err)
+                }
+            )
+            safe_print(f"[!!BACKEND ERROR!!] {e}")
+            # For 401, still return empty response
+            if hasattr(e, 'response') and e.response.status_code == 401:
+                return {
+                    "target": sender,
+                    "messages": [],
+                    "reaction": None
+                }
+        # For non-401 errors, still raise to be caught by main loop
+        if not (hasattr(e, 'response') and e.response.status_code == 401):
+            raise
+        
+    except requests.exceptions.Timeout as e:
+        log_backend(
+            f"⏱️ BACKEND TIMEOUT",
+            {
+                "url": current_api_url,
+                "timeout_seconds": 30,
+                "error": str(e),
+                "message_id": message_id
+            }
+        )
+        safe_print(f"[!!CONNECTION ERROR!!] Backend request timed out after 30 seconds")
+        raise
+        
+    except requests.exceptions.ConnectionError as e:
+        log_backend(
+            f"🔌 BACKEND CONNECTION ERROR",
+            {
+                "url": current_api_url,
+                "error": str(e),
+                "message_id": message_id
+            }
+        )
+        safe_print(f"[!!CONNECTION ERROR!!] Failed to connect to backend: {e}")
+        safe_print(f"[!!CONNECTION ERROR!!] Backend URL: {current_api_url}")
+        raise
+        
+    except Exception as e:
+        log_backend(
+            f"💥 UNEXPECTED ERROR calling backend",
+            {
+                "url": current_api_url,
+                "error_type": type(e).__name__,
+                "error": str(e),
+                "message_id": message_id
+            }
+        )
+        safe_print(f"[!!CONNECTION ERROR!!] Unexpected error: {type(e).__name__}: {e}")
+        safe_print(f"[!!CONNECTION ERROR!!] Backend URL: {current_api_url}")
+        raise
+
+def handle_structured_response(response: Dict, target_phone: str):
+    """
+    Process the structured response from backend with human-like timing.
+    
+    Expected response format:
+    {
+        "target": "+12108497547",
+        "messages": [
+            {
+                "text": "Message content",
+                "typing_delay": 2.5,
+                "delay_before": 0.8,
+                "effect": "slam"  // optional: slam, loud, gentle, none
+            }
+        ],
+        "reaction": {
+            "type": "like",
+            "delay_before": 0.5
+        }
+    }
+    """
+    # Update target if backend specifies a different one
+    target = response.get('target', target_phone)
+    
+    # Send reaction first if present
+    if response.get('reaction') and ENABLE_REACTIONS:
+        reaction = response['reaction']
+        delay = reaction.get('delay_before', 0.5)
+        if delay > 0:
+            time.sleep(delay)
+        safe_print(f"[REACT] Sending {reaction['type']} to {target}")
+        success = send_tapback(target, reaction['type'])
+        if not success:
+            safe_print(f"[REACT] ⚠️ Reaction may not have been delivered, continuing with messages...")
+    
+    # Handle new structured format
+    messages = response.get('messages', [])
+    
+    # Fallback to old format if messages array not present
+    if not messages and response.get('reply_text'):
+        messages = [{
+            'text': response['reply_text'],
+            'typing_delay': 2.0,
+            'delay_before': 0.5
+        }]
+    
+    # Send each message with typing simulation
+    for i, msg_data in enumerate(messages):
+        text = msg_data.get('text', '')
+        if not text:
+            continue
+        
+        # Get optional effect parameter
+        effect = msg_data.get('effect', 'none')
+        
+        # Use backend's timing if provided, otherwise calculate realistic human timing
+        typing_delay = msg_data.get('typing_delay')
+        if typing_delay is None:
+            typing_delay = calculate_human_typing_delay(text)
+        
+        delay_before = msg_data.get('delay_before')
+        if delay_before is None:
+            delay_before = calculate_delay_before(is_first_message=(i == 0))
+        
+        # Wait before starting to type (thinking pause)
+        if delay_before > 0:
+            safe_print(f"[PAUSE] Waiting {delay_before:.1f}s before typing...")
+            time.sleep(delay_before)
+        
+        # Show typing indicator for realistic duration
+        if ENABLE_TYPING:
+            effect_label = f" [{effect}]" if effect and effect != "none" else ""
+            safe_print(f"[TYPE] Typing '{text[:50]}...' for {typing_delay:.1f}s ({len(text)} chars){effect_label}")
+            show_typing_indicator(target)
+            time.sleep(typing_delay)
+        
+        # Send the actual message
+        safe_print(f"[OUT] To {target}: {text[:80]}{'...' if len(text) > 80 else ''}")
+        log_backend(
+            f"📤 Sending iMessage",
+            {
+                "target": target,
+                "message_index": i + 1,
+                "text_preview": text[:100] + "..." if len(text) > 100 else text,
+                "effect": effect
+            }
+        )
+        
+        success = send_imessage(target, text, effect)
+        
+        if not success:
+            log_backend(
+                f"❌ iMessage send FAILED",
+                {
+                    "target": target,
+                    "message_index": i + 1,
+                    "text_preview": text[:100]
+                }
+            )
+            safe_print(f"[ERROR] ⚠️ Message #{i+1} FAILED to send!")
+            safe_print(f"[ERROR] Continuing with remaining messages...")
+        else:
+            log_backend(
+                f"✅ iMessage sent successfully",
+                {
+                    "target": target,
+                    "message_index": i + 1
+                }
+            )
+            safe_print(f"[OUT] ✅ Message #{i+1} delivered")
+
+# -----------------------------
+# Main loop
+# -----------------------------
+def main():
+    global processed_message_ids
+    
+    # Load processed message IDs on startup (CRITICAL for preventing duplicates)
+    processed_message_ids = load_processed_ids()
+    safe_print(f"Loaded {len(processed_message_ids)} previously processed message IDs")
+    
+    last = read_last()
+    safe_print(f"Starting bridge. Watching for new messages after ROWID {last}...")
+    safe_print(f"Typing indicator: {'enabled' if ENABLE_TYPING else 'disabled'}")
+    safe_print(f"Reactions: {'enabled' if ENABLE_REACTIONS else 'disabled'}")
+
+    while True:
+        try:
+            with open_ro(CHAT_DB) as conn:
+                c = conn.cursor()
+                c.execute(SQL, (last,))
+                rows = c.fetchall()
+        except Exception as e:
+            safe_print(f"[DB ERROR] {e}")
+            time.sleep(POLL)
+            continue
+
+        if rows:
+            safe_print(f"Found {len(rows)} new message(s) in database.")
+
+        for row in rows:
+            rid, text, sender = row
+            
+            # Update last ROWID even if we skip this message
+            last = rid
+            
+            if not text or not sender:
+                write_last(last)
+                continue
+            
+            # CRITICAL: Skip if already processed (prevents duplicates!)
+            if rid in processed_message_ids:
+                safe_print(f"[SKIP] Already processed message ID {rid}")
+                continue
+
+            try:
+                safe_print(f"[IN] {sender}: {text}")
+                log_backend(f"📨 INCOMING iMessage", {"sender": sender, "text": text, "message_id": rid})
+                
+                # Call backend with new structured format
+                response = call_sf(sender, text, rid)
+                
+                # Check if this was a 401 error (marked with _401_error flag)
+                is_401_error = response.get('_401_error', False)
+                
+                if is_401_error:
+                    log_backend(
+                        f"⚠️ 401 UNAUTHORIZED - Message NOT marked as processed, will retry",
+                        {
+                            "message_id": rid,
+                            "sender": sender,
+                            "note": "Message will be retried when backend auth is fixed"
+                        }
+                    )
+                    safe_print(f"[WARNING] 401 error - message {rid} will be retried. Bridge continues running.")
+                    # Don't mark as processed - will retry next loop
+                    write_last(last)  # Update ROWID to avoid blocking on this message
+                    continue
+                
+                # Log that we received and are processing the response
+                messages = response.get('messages', [])
+                log_backend(
+                    f"✅ Backend response received, processing...",
+                    {
+                        "message_id": rid,
+                        "response_summary": {
+                            "target": response.get('target'),
+                            "message_count": len(messages),
+                            "has_reaction": response.get('reaction') is not None
+                        }
+                    }
+                )
+                
+                # Handle structured response with human-like timing
+                handle_structured_response(response, sender)
+                
+                # Mark as processed AFTER successful send
+                processed_message_ids.add(rid)
+                save_processed_id(rid)
+                write_last(last)
+                
+                log_backend(f"✅ SUCCESS - Message ID {rid} fully processed and sent", {"message_id": rid})
+                safe_print(f"[SUCCESS] Processed message ID {rid}")
+
+            except Exception as e:
+                import traceback
+                error_trace = traceback.format_exc()
+                
+                log_backend(
+                    f"❌ FAILED to process message",
+                    {
+                        "message_id": rid,
+                        "sender": sender,
+                        "error_type": type(e).__name__,
+                        "error": str(e),
+                        "traceback": error_trace
+                    }
+                )
+                
+                safe_print(f"[!!ERROR!!] Failed to process ROWID {rid}: {e}")
+                traceback.print_exc()
+                # Don't mark as processed if it failed - will retry next loop
+
+        time.sleep(POLL)
+
+# -----------------------------
+if __name__ == "__main__":
+    # Wrap main in exception handler to prevent crashes
+    try:
+        main()
+    except KeyboardInterrupt:
+        safe_print("\n[SHUTDOWN] Bridge stopped by user (Ctrl+C)")
+        log_backend("🛑 Bridge stopped by user (KeyboardInterrupt)", {})
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        safe_print(f"\n[FATAL ERROR] Bridge crashed: {e}")
+        safe_print(error_trace)
+        log_backend(
+            "💥 FATAL CRASH - Bridge terminated unexpectedly",
+            {
+                "error_type": type(e).__name__,
+                "error": str(e),
+                "traceback": error_trace
+            }
+        )
+        # Exit with error code so LaunchAgent can restart
+        exit(1)

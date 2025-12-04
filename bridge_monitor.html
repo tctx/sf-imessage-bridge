@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bridge Process Monitor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+            font-size: 28px;
+        }
+        
+        .status-box {
+            text-align: center;
+            padding: 30px;
+            border-radius: 15px;
+            margin-bottom: 20px;
+            transition: all 0.3s ease;
+        }
+        
+        .status-box.zero {
+            background: #fee;
+            border: 2px solid #fcc;
+        }
+        
+        .status-box.one {
+            background: #efe;
+            border: 2px solid #cfc;
+        }
+        
+        .status-box.multiple {
+            background: #ffe;
+            border: 2px solid #fcc;
+        }
+        
+        .count {
+            font-size: 72px;
+            font-weight: bold;
+            margin: 20px 0;
+            line-height: 1;
+        }
+        
+        .count.zero {
+            color: #c00;
+        }
+        
+        .count.one {
+            color: #0a0;
+        }
+        
+        .count.multiple {
+            color: #fa0;
+        }
+        
+        .status-text {
+            font-size: 18px;
+            margin: 10px 0;
+            font-weight: 500;
+        }
+        
+        .details {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 10px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+            justify-content: center;
+        }
+        
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+        
+        .btn-refresh {
+            background: #667eea;
+            color: white;
+        }
+        
+        .btn-kill {
+            background: #f56565;
+            color: white;
+        }
+        
+        .btn-kill:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .last-update {
+            text-align: center;
+            color: #666;
+            font-size: 12px;
+            margin-top: 20px;
+        }
+        
+        .auto-refresh {
+            text-align: center;
+            margin-top: 15px;
+        }
+        
+        .auto-refresh label {
+            font-size: 14px;
+            color: #666;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 Bridge Process Monitor</h1>
+        
+        <div id="statusBox" class="status-box">
+            <div id="count" class="count">-</div>
+            <div id="statusText" class="status-text">Checking...</div>
+            <div id="detailsText" class="details-text"></div>
+        </div>
+        
+        <div id="details" class="details">Loading...</div>
+        
+        <div class="controls">
+            <button class="btn-refresh" onclick="updateStatus()">🔄 Refresh Now</button>
+            <button id="killBtn" class="btn-kill" onclick="killDuplicates()" disabled>⚠️ Kill Duplicates</button>
+        </div>
+        
+        <div class="auto-refresh">
+            <label>
+                <input type="checkbox" id="autoRefresh" checked onchange="toggleAutoRefresh()">
+                Auto-refresh every 2 seconds
+            </label>
+        </div>
+        
+        <div id="lastUpdate" class="last-update"></div>
+    </div>
+    
+    <script>
+        let autoRefreshInterval = null;
+        let autoRefreshEnabled = true;
+        
+        function updateStatus() {
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    const statusBox = document.getElementById('statusBox');
+                    const countEl = document.getElementById('count');
+                    const statusText = document.getElementById('statusText');
+                    const detailsText = document.getElementById('detailsText');
+                    const detailsEl = document.getElementById('details');
+                    const killBtn = document.getElementById('killBtn');
+                    const lastUpdate = document.getElementById('lastUpdate');
+                    
+                    const count = data.count;
+                    
+                    // Update status box
+                    statusBox.className = 'status-box';
+                    countEl.className = 'count';
+                    
+                    if (count === 0) {
+                        statusBox.classList.add('zero');
+                        countEl.classList.add('zero');
+                        countEl.textContent = '0';
+                        statusText.textContent = '❌ No bridge processes running';
+                        statusText.style.color = '#c00';
+                        detailsText.textContent = 'Bridge is not running';
+                        killBtn.disabled = true;
+                        detailsEl.textContent = 'No bridge processes found.\n\nTo start the bridge:\n  launchctl start com.sf.imessage-bridge\n  or\n  ./keep_bridge_alive.sh';
+                    } else if (count === 1) {
+                        statusBox.classList.add('one');
+                        countEl.classList.add('one');
+                        countEl.textContent = '1';
+                        statusText.textContent = '✅ One bridge process running (correct)';
+                        statusText.style.color = '#0a0';
+                        detailsText.textContent = `PID: ${data.pids[0]}`;
+                        killBtn.disabled = true;
+                        detailsEl.textContent = data.processes.join('\n\n');
+                    } else {
+                        statusBox.classList.add('multiple');
+                        countEl.classList.add('multiple');
+                        countEl.textContent = count;
+                        statusText.textContent = `⚠️ ${count} bridge processes running (should be 1)`;
+                        statusText.style.color = '#fa0';
+                        detailsText.textContent = `PIDs: ${data.pids.join(', ')}`;
+                        killBtn.disabled = false;
+                        detailsEl.textContent = data.processes.join('\n\n') + '\n\n⚠️ Multiple instances detected!\nClick "Kill Duplicates" to stop all but one.';
+                    }
+                    
+                    lastUpdate.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    document.getElementById('statusText').textContent = '❌ Error fetching status';
+                    document.getElementById('details').textContent = 'Error: ' + error.message;
+                });
+        }
+        
+        function killDuplicates() {
+            fetch('/api/kill-duplicates', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        setTimeout(updateStatus, 500);
+                    } else {
+                        alert('Error: ' + data.error);
+                    }
+                })
+                .catch(error => {
+                    alert('Error: ' + error.message);
+                });
+        }
+        
+        function toggleAutoRefresh() {
+            autoRefreshEnabled = document.getElementById('autoRefresh').checked;
+            if (autoRefreshEnabled) {
+                startAutoRefresh();
+            } else {
+                stopAutoRefresh();
+            }
+        }
+        
+        function startAutoRefresh() {
+            stopAutoRefresh();
+            autoRefreshInterval = setInterval(updateStatus, 2000);
+        }
+        
+        function stopAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+            }
+        }
+        
+        // Initial load
+        updateStatus();
+        if (autoRefreshEnabled) {
+            startAutoRefresh();
+        }
+    </script>
+</body>
+</html>
+
