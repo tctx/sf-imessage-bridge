@@ -6,47 +6,55 @@ on run argv
 	set targetNumber to item 1 of argv
 	
 	try
-		-- Activate Messages
+		-----------------------------------------------
+		-- 0. Activate Messages and open that chat
+		-----------------------------------------------
 		tell application "Messages"
 			activate
-			delay 0.45
-			
-			-- Get the target buddy to ensure conversation exists
-			set targetService to 1st service whose service type = iMessage
-			set targetBuddy to buddy targetNumber of targetService
+			-- use imessage: URL scheme to jump into the right convo
+			open location ("imessage:" & targetNumber)
 		end tell
 		
-		-- Give Messages time to fully activate and open conversation window
-		-- Critical for first messages in new threads
-		delay 0.36
+		-- give macOS a moment to open/switch the window
+		delay 0.6
 		
-		-- Simulate typing to trigger the typing indicator
+		-----------------------------------------------
+		-- 1. Fake typing in that conversation
+		-----------------------------------------------
 		tell application "System Events"
 			tell process "Messages"
-				-- Make sure Messages is frontmost
 				set frontmost to true
-				delay 0.12
+				delay 0.15
 				
-				-- Click the window to focus text input field
-				-- This is critical for making typing work reliably
+				-- make sure we're in the chat's text field
+				-- clicking window 1 is usually enough once open location has run
 				try
-					click (first window)
-					delay 0.09
+					click window 1
+					delay 0.1
 				end try
 				
-				-- Type characters (triggers typing indicator on recipient's device)
-				keystroke "a"
-				delay 0.045
-				keystroke "b"
-				delay 0.045
-				keystroke "c"
-				delay 0.045
+				-- clear any existing draft
+				keystroke "a" using {command down}
+				delay 0.05
+				key code 51 -- delete
+				delay 0.05
 				
-				-- Delete the characters
+				-- type some characters to trigger the typing indicator
+				keystroke "a"
+				delay 0.08
+				keystroke "b"
+				delay 0.08
+				keystroke "c"
+				delay 0.08
+				
+				-- pause here if you want the bubble to "type" longer
+				delay 1.0
+				
+				-- delete the characters
 				key code 51
-				delay 0.03
+				delay 0.04
 				key code 51
-				delay 0.03
+				delay 0.04
 				key code 51
 			end tell
 		end tell
